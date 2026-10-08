@@ -1,0 +1,24 @@
+{
+  "name": "dsh-cu-n1",
+  "description": "dsh plugin: computer-use（cu_screenshot 截屏 / cu_act 键鼠操作 / cu_probe 只读查询 / cu_wait 等条件），带输入目标护栏（cu-guard）；模型侧 DeepSeek/GLM，靠 SoM 编号定位绕开 grounding 短板",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib/index.js",
+    "lib/cu-shot.ps1",
+    "lib/cu-act.py",
+    "lib/cu-grab.py",
+    "lib/cu-probe.py",
+    "lib/cu-guard.py",
+    "lib/cu-guard.policy.json",
+    "advisor/cu-advisor.py",
+    "advisor/advisor.local.gateway.example.json",
+    "verify-cu-n1.mjs",
+    "test/cu-test.patch.yml",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE"
+  ],
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,5 @@
+{
+  "baseUrl": "https://your-gateway.example.com/v1",
+  "model": "your-model-id",
+  "_说明": "网关线路模板：改名 advisor.local.json 生效。baseUrl 与 model 都是占位值，请按你自己的线路替换。注意 key 目前读 .credentials.yaml 的 DEEPSEEK_API_KEY；若你的线路用别的凭证名，改 cu-advisor.py 的 load_key() 即可。"
+}

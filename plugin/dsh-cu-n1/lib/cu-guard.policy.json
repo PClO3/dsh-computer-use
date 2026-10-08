@@ -1,0 +1,76 @@
+{
+  "_说明": "cu-guard 策略文件。改完立即生效（下次执行键鼠动作、重新读取策略时生效）。",
+  "_档位": "当前档位：标准",
+  "_重要": "⚠️ 这里**只放真正可调的开关**。提权 / 开子进程 / 杀进程 / 改系统设置 / 关机重启 这五条是**硬底线、刻意不可配置**（这两条刻意绝对化），所以它们不出现在这个文件里 —— 刻意不给开关，别去代码里找。",
+
+  "version": 1,
+
+  "registryWrite": "deny",
+  "_registryWrite": "写注册表。deny = winreg 写操作 + ctypes 里的 RegSetValue*/RegCreateKey*/RegDeleteKey*/RegSetKeyValue* 全拒。读注册表不受影响。这是**唯一可配置的硬项之一**（改成 allow 会放开注册表写入）。",
+
+  "fileWrites": "workdir-only",
+  "_fileWrites": "文件写入。workdir-only = 只许写插件工作目录（含 <workdir>/tmp），别处一律拒。这条同时保护护栏自己不被改掉。可选 deny-destructive（只禁删改、允许新建 —— **注意：这个档下实测仍能往任意可写位置投文件，包括 Startup 目录做自启动**）| allow。",
+
+  "blockCodeNew": true,
+  "_blockCodeNew": "★反绕过。禁止构造 code 对象。实测：types.CodeType 是「造任意字节码 → 改掉审计钩子链表头」这条已知绕过的入口；拦掉它之后 compile()/exec() 照常可用，不误伤正常的代码执行。不建议关。",
+
+  "blockMarshalLoads": "user-code-only",
+  "_blockMarshalLoads": "拦 marshal.loads（它能从字节直接反序列化出 code 对象，是 CodeType 之外剩下那条造任意字节码的路）。默认 'user-code-only' = **只拦用户代码发起的调用**。实测依据：标准库 .pyc 的加载走 <frozen importlib._bootstrap_external> 的 _compile_bytecode，用户代码发起的执行走另一条路 —— 调用方帧可以精确区分，所以既能堵住这条路，又不会让「护栏装好后 import 新模块」失败。可选值：'user-code-only'（默认）| 'always'（连 import 一起禁，会误伤延迟导入）| false。",
+
+  "blockCodeAttrAssignment": true,
+  "_blockCodeAttrAssignment": "拦「从用户代码给函数换 __code__ / __globals__ / __closure__」（把 code 对象装上去的那一步）。实测：2000 次普通属性赋值触发 0 次相关事件，拦它几乎零成本。⚠️ 注意 __defaults__/__kwdefaults__ **故意不在名单里** —— collections.namedtuple 内部会设 __new__.__defaults__，拦了它 namedtuple 就废，而 pyautogui 返回的 Point/Size 正是 namedtuple（这个坑踩过，会把键鼠能力做废）。",
+
+  "guiGuard": {
+    "_说明": "鼠标点击 / 键盘输入的目标窗口护栏。为什么需要它：只要给了鼠标，模型就能点开任务管理器点「结束任务」，或点进终端敲 taskkill —— 那等于绕过了上面所有 Python 层的限制。",
+    "enabled": true,
+    "enforce": true,
+    "_enforce": "true = 命中黑名单时当场拒绝；false = 只记审计、放行（调试用）。",
+
+    "denyElevatedWindows": true,
+    "_denyElevatedWindows": "目标窗口属于已提权进程 → 鼠标键盘都不许碰。这条是「拿不到管理员权限」在 GUI 侧的兜底。",
+
+    "elevatedUnknown": "deny",
+
+    "unknownWindow": "deny",
+    "_unknownWindow": "取不到目标窗口（光标下没有窗口、前台窗口也取不到）时怎么办。deny（默认，fail-closed）= 拒绝；allow = 放行并记审计。⚠️ 这是窄口 fail-open 的修复项；默认 deny 有代价（若某环境下窗口信息常年取不到，连正常点击都会被拦），所以做成可配的。",
+
+    "denyHotkeys": [
+      "win+r",
+      "win+l",
+      "win+x",
+      "win+i",
+      "ctrl+shift+esc",
+      "ctrl+shift+enter",
+      "ctrl+alt+del"
+    ],
+    "_denyHotkeys": "全局热键黑名单。**为什么必须在按键层拦**：窗口级护栏看的是「这一下点给哪个窗口」，而全局热键由 Windows 按组合键本身路由、不看焦点窗口 —— 前台是记事本时按 Win+R，运行框照样弹出来。**注意：本名单是逐组合精确匹配，不是拦 Win 键本身。** 当前拦的是 win+r / win+l / win+x / win+i / ctrl+shift+esc / ctrl+shift+enter / ctrl+alt+del 这 7 条；**Win 单键、Win+S / Win+Q / Win+D / Win+E 等未列入的组合是放行的**。若想连 Win 键一并拦掉，往数组里加一条裸 \"win\"（解析器支持纯修饰键写法，含义是「该修饰键本身按下即拒」），那样一切 Win 组合都到不了。ctrl+shift+esc 直达任务管理器；ctrl+alt+del 是内核级 SAS（本来就注入不了，列着只是留痕）；ctrl+shift+enter 在开始菜单里是「以管理员身份运行」。注意：alt+f4 **有意未加** —— 关窗口 ≠ 关 dsh（它还在托盘跑），属低危；要加就自己加进这个数组。",
+    "_elevatedUnknown": "查不出目标进程提权状态时怎么办。deny（默认，保守）= 拒绝；allow = 放行。实测：查不出的典型原因就是 OpenProcess 被拒，而那正是「对方防护更高」的信号 —— 所以默认按时拒。⚠️ 不要把它改成 fail-open（未知当放行）：那样这条规则会形同虚设，属高危。",
+
+    "denyMouseAndKeyboard": [
+      "consent.exe",
+      "taskmgr.exe",
+      "procexp.exe", "procexp64.exe", "processhacker.exe", "systeminformer.exe",
+      "autoruns.exe", "autorunsc.exe",
+      "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe",
+      "windowsterminal.exe", "wt.exe", "openconsole.exe",
+      "bash.exe", "wsl.exe", "wslhost.exe", "mintty.exe",
+      "alacritty.exe", "wezterm-gui.exe", "conemu.exe", "conemu64.exe",
+      "cscript.exe", "wscript.exe", "mshta.exe", "rundll32.exe",
+      "regedit.exe", "mmc.exe", "gpedit.msc", "taskschd.msc",
+      "services.msc", "diskmgmt.msc", "eventvwr.exe", "systemsettings.exe"
+    ],
+    "_denyMouseAndKeyboard": "这些进程的窗口：鼠标和键盘都不许碰。想放行某个（比如你自己常用的终端），把这一行删掉即可。",
+
+    "denyKeyboardOnly": [
+      "explorer.exe",
+      "startmenuexperiencehost.exe",
+      "searchexperiencehost.exe", "searchhost.exe",
+      "shellexperiencehost.exe", "textinputhost.exe", "sihost.exe",
+      "mstsc.exe"
+    ],
+    "_denyKeyboardOnly": "这些进程的窗口：只禁键盘、鼠标照常。理由：资源管理器的地址栏能直接执行命令，「Win+R」运行框和开始菜单搜索框也都属于 explorer —— 堵住键盘就堵住了「用鼠标开一个终端再往里敲 taskkill」这条路；鼠标点文件不受影响。"
+  },
+
+  "purgeCachedSymbols": true,
+  "_purgeCachedSymbols": "装上护栏时，把 ctypes 已经缓存下来的危险符号从 DLL 对象里删掉。ctypes 会缓存解析结果，缓存过的符号再访问不会重新触发审计事件，所以这一步是兜底。"
+}
