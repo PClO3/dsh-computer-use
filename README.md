@@ -107,3 +107,8 @@ mklink /J "<DSH_HOME>\plugins\dsh-cu-n1\node_modules\@deepseek-ai" "<DSH_HOME>\p
 - **第三方与免责**：第三方组件清单（含 **MouseInfo GPLv3+** 的特别说明）、安全声明与免责、许可合规速查表，见 [`NOTICE.md`](NOTICE.md)；逐组件清单另见 [`plugin/dsh-cu-n1/THIRD_PARTY_NOTICES.md`](plugin/dsh-cu-n1/THIRD_PARTY_NOTICES.md)。
 
 **安全提示（一句话）**：本项目是通用桌面自动化工具，**仅供学习与合法用途**；护栏已尽力落实，但**不保证 AI 一定不越权**，请谨慎处理权限、风险自负 —— 完整声明见 [`NOTICE.md`](NOTICE.md)。
+---
+
+## 六、使用建议（以 DeepSeek v4.1 Flash 为例）
+
+- 建议使用 `low` 档的思考强度，均衡操作速度与准确度。`off` 档的思考强度会导致模型乱点屏幕，`high` 或 `max` 档的思考强度会导致思考时间过长。
