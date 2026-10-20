@@ -7,6 +7,8 @@
   "files": [
     "lib/index.js",
     "lib/cu-shot.ps1",
+    "lib/cu-uia.ps1",
+    "lib/cu-uia-serve.ps1",
     "lib/cu-act.py",
     "lib/cu-grab.py",
     "lib/cu-probe.py",

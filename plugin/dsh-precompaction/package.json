@@ -1,0 +1,17 @@
+{
+  "name": "dsh-precompaction",
+  "description": "dsh plugin: 上下文预压缩后端 —— 在 400k token 时后台算摘要，主循环不停顿；官方 dsh-compaction-basic 的触发线原样保留当兜底",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib/index.js",
+    "install-precompaction.mjs",
+    "verify-install.mjs",
+    "verify-precompaction.mjs",
+    "check-compaction-events.py",
+    "patch-snippet.yml",
+    "patch-snippet-test.yml"
+  ],
+  "license": "Apache-2.0"
+}

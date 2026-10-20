@@ -1,0 +1,18 @@
+
+# ── precompaction：上下文预压缩后端 ─────────────────────────────────────────────
+# 官方 compaction-basic 到触发线时会 await 摘要调用，主循环停住（数十秒）；
+# 本插件提前在 triggerTokens 时**后台**算摘要、主循环一秒不停，下一个 agent/pre-step 同步原子替换。
+# 官方那条线原样保留当兜底，两条线并存。
+#
+# 回滚：在 config 下加一行 `enabled: false`（只停动作、仍加载），或把本块整段删掉（需重启桌面端）。
+#
+# ⚠️ name 行里的 @@ENTRY@@ 由 install-precompaction.mjs 按你的 DSH_HOME 自动替换成真实路径。
+#    不要手工照抄本文件到 patch —— 请用安装脚本（它带备份与 4 条写前断言 + 3 条写后复核）。
+- insert:
+    - id: precompaction
+      name: '@@ENTRY@@'
+      config:
+        triggerTokens: 400000
+        dangerTokens: 480000
+        keepTokens: 16000
+        overlapTokens: 4000

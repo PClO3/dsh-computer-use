@@ -1,0 +1,18 @@
+
+# ── precompaction（测试用 · 低触发点）：只为验证「钩子真的会响」 ──────────────────
+# ⚠️ 窗口不能太小：实测（2026-10-18，真实 dsh 进程）全新会话 step1 压力 = 0，
+#    step2 读完一个 31KB 文件后 = 15,170 —— 一步就跨过整个窗口，插件会走
+#    「压力 ≥ dangerTokens ⇒ 让位官方」那一支，**永远不起 job**（看起来像没生效）。
+#    所以这里用 8000 / 200000 / 3000：下界够低能触发，上界够高不会被一步跨过。
+# 官方那条线远高于一次性短会话的上下文，所以短会话里出现的 compaction 一定是本插件的。
+# 验完请用 `node install-precompaction.mjs --revert --apply` 还原，再按 patch-snippet.yml 装生产值。
+#
+# ⚠️ name 行里的 @@ENTRY@@ 由 install-precompaction.mjs 按你的 DSH_HOME 自动替换成真实路径。
+- insert:
+    - id: precompaction
+      name: '@@ENTRY@@'
+      config:
+        triggerTokens: 8000
+        dangerTokens: 200000
+        keepTokens: 3000
+        overlapTokens: 1000

@@ -61,6 +61,9 @@ function installShim() {
     const child = realSpawn(cmd, args, { ...opts, stdio: ["ignore", ofd, efd] });
     const out = new EventEmitter();
     const err = new EventEmitter();
+    // 常驻 UIA 管理器会调 setEncoding；假流要跟真流一样提供它
+    out.setEncoding = () => {};
+    err.setEncoding = () => {};
     child.stdout = out;
     child.stderr = err;
     child.on("close", () => {
@@ -130,6 +133,48 @@ const blocks = shot.output.render({}, shotValue);
 check("render 首块是 text", blocks[0]?.type === "text" && blocks[0].text.includes("<path>"));
 check("render 第二块是 image", blocks[1]?.type === "image" && blocks[1].attachment?.attachmentId === "att-test-0001");
 
+// --- cu_screenshot 降采样（新增）-----------------------------------------
+// ★ 为什么要有这一组：实测不主动降采样就一定吃满 provider 单图 token 上限，
+//   降到 1024 宽只剩 418（按 16:10 屏算；早期写的 340 是按 2:1 算的，换宽高比要重算）。但**只有插件自己先降才有用** —— harness 会把图投到
+//   "刚好用满 provider 单图 token 上限"的尺寸，不主动降就一定吃满上限。
+//   所以「默认降」这件事必须有断言守着，否则哪天被改回不降，成本会悄悄翻倍。
+const shotDflt = await shot.execute({}, exec);
+check("★ 截图默认降采样（不再默认发全分辨率）",
+  shotDflt.downsampled === true, `downsampled=${shotDflt.downsampled} 尺寸=${shotDflt.width}x${shotDflt.height}`);
+check("降采样后宽度 <= 默认 1280", shotDflt.width <= 1280, `实际宽 ${shotDflt.width}`);
+check("降采样时报告 screen 物理分辨率（供坐标换算）",
+  typeof shotDflt.screen?.width === "number" && shotDflt.screen.width > shotDflt.width,
+  `screen=${shotDflt.screen?.width} 图=${shotDflt.width}`);
+check("降采样 render 带换算提示", /乘以|缩小展示/.test(shot.output.render({}, shotDflt)[0]?.text ?? ""));
+
+const shotFull = await shot.execute({ maxWidth: 0 }, exec);
+check("maxWidth:0 = 不降采样（拿原分辨率）",
+  shotFull.downsampled === undefined, `downsampled=${shotFull.downsampled} 尺寸=${shotFull.width}x${shotFull.height}`);
+// ★ 注意：mock 的 saveImage 固定回报 640x400，所以**不能**拿返回值宽度去断言真实分辨率。
+//   要看真实抓屏尺寸，得读 PNG 头（IHDR）—— 那才是 cu-grab.py 实际写出的像素。
+const pngSize = (p) => {
+  const b = readFileSync(p);
+  return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+};
+const fullPx = pngSize(shotFull.path);
+check("★ maxWidth:0 时 PNG 真的是物理分辨率", fullPx.w === shotFull.screen.width,
+  `PNG ${fullPx.w}x${fullPx.h} vs screen ${shotFull.screen.width}x${shotFull.screen.height}`);
+const dfltPx = pngSize(shotDflt.path);
+check("★ 默认档 PNG 真的被降到了 <=1280", dfltPx.w <= 1280 && dfltPx.w < fullPx.w,
+  `默认 ${dfltPx.w}x${dfltPx.h} vs 原图 ${fullPx.w}x${fullPx.h}`);
+check("降采样保比例（不拉伸变形）",
+  Math.abs((dfltPx.w / dfltPx.h) - (fullPx.w / fullPx.h)) < 0.02,
+  `比例 ${(dfltPx.w / dfltPx.h).toFixed(3)} vs ${(fullPx.w / fullPx.h).toFixed(3)}`);
+
+const shotSmall = await shot.execute({ maxWidth: 800 }, exec);
+const smallPx = pngSize(shotSmall.path);
+check("maxWidth:800 生效", smallPx.w <= 800 && shotSmall.downsampled === true, `实际宽 ${smallPx.w}`);
+check("★ 降采样不放大（原图更窄时保持原样）", smallPx.w <= fullPx.w, `${smallPx.w} <= ${fullPx.w}`);
+
+let threw = "";
+try { await shot.execute({ maxWidth: -5 }, exec); } catch (e) { threw = String(e.message); }
+check("★ 非法 maxWidth 被拒（不静默用默认值）", /maxWidth/.test(threw), threw);
+
 // --- cu_screenshot som 路径 ---
 // ★ 这里的断言分两档，因为 "elements 非空" 是**环境条件**、不是代码正确性：
 //   UIA 枚举的是**前台窗口**的可交互元素。如果前台窗口本身没有（比如焦点在某
@@ -157,10 +202,70 @@ if (somValue.elements?.length > 0) {
   console.log("      在普通桌面（前台是记事本/浏览器等）重跑，这两条会变成 PASS。");
 }
 
+// --- cu_screenshot scope（新增：枚举范围 foreground / taskbar / desktop）----
+// ★ 为什么要有这一组：以前枚举范围只有"前台窗口"一种，而**编码 bug 会让它静默
+//   退化成整个桌面**（编码 bug，已修）。现在范围是**显式参数**：
+//   点任务栏图标用 taskbar，常规用 foreground，兜底用 desktop。
+//   非法值必须报错，不能静默用默认值 —— 否则模型以为换了范围、其实没换。
+threw = "";
+try { await shot.execute({ som: true, scope: "nonsense" }, exec); } catch (e) { threw = String(e.message); }
+check("★ 非法 scope 被拒（不静默用默认值）", /scope/.test(threw), threw);
+
+const shotTb = await shot.execute({ som: true, scope: "taskbar" }, exec);
+check("scope=taskbar 能跑通（未降级）", shotTb.somDegraded === undefined, `somDegraded=${shotTb.somDegraded}`);
+if (shotTb.scopeDesc) {
+  check("scope=taskbar 时 scopeDesc 指明任务栏", /taskbar/.test(String(shotTb.scopeDesc)), String(shotTb.scopeDesc));
+} else {
+  console.log("SKIP  scopeDesc —— 受限环境下 UIA 拿不到元素（见上方 SKIP 说明）。");
+}
+// 截断必须**可见**：枚举数 > 收录数时，render 里必须明说共多少个
+if (shotTb.truncated === true) {
+  const t = shot.output.render({}, shotTb)[0]?.text ?? "";
+  check("★ 截断时 render 明说「本范围共 N 个」", /本范围共\s*\d+\s*个/.test(t), t.slice(-160));
+  check("截断时 totalInteractive > 收录条数", shotTb.totalInteractive > shotTb.elements.length,
+    `total=${shotTb.totalInteractive} 收录=${shotTb.elements.length}`);
+} else {
+  console.log(`SKIP  截断标记 —— 本次 taskbar 范围共 ${shotTb.totalInteractive ?? "?"} 个、未触发截断。`);
+}
+
+// --- cu_screenshot find（新增：按名字过滤元素清单）------------------------
+// ★ 为什么要有它：som 的元素清单文字（60 条约 800 token）几乎和图片一样贵。
+//   模型常常只是"想找某个东西"，这时把清单过滤到匹配项，能把 800 token 压到几十。
+//   两个必须守住的点：① 过滤后清单**只能**含匹配项；② 没匹配到要**如实报 0**，
+//   不能让模型以为"这东西不存在"（所以 matched 字段必须回传）。
+threw = "";
+try { await shot.execute({ som: true, find: 123 }, exec); } catch (e) { threw = String(e.message); }
+check("★ find 非字符串被拒（不静默当空串）", /find/.test(threw), threw);
+threw = "";
+try { await shot.execute({ find: "搜索" }, exec); } catch (e) { threw = String(e.message); }
+check("★ 不带 som 就传 find 被拒（防静默忽略）", /som/.test(threw), threw);
+threw = "";
+try { await shot.execute({ scope: "taskbar" }, exec); } catch (e) { threw = String(e.message); }
+check("★ 不带 som 就传 scope 被拒（防静默忽略）", /som/.test(threw), threw);
+
+const shotFind = await shot.execute({ som: true, scope: "taskbar", find: "搜索" }, exec);
+check("find 能跑通（未降级）", shotFind.somDegraded === undefined, `somDegraded=${shotFind.somDegraded}`);
+if (shotFind.find !== undefined) {
+  check("find 回传 find 与 matched", shotFind.find === "搜索" && typeof shotFind.matched === "number",
+    `find=${shotFind.find} matched=${shotFind.matched}`);
+  check("★ find 过滤后清单只含匹配项",
+    (shotFind.elements ?? []).every((e) => String(e.name).includes("搜索")),
+    JSON.stringify((shotFind.elements ?? []).map((e) => e.name)).slice(0, 140));
+  const noMatch = await shot.execute({ som: true, scope: "taskbar", find: "zzz绝对不存在zzz" }, exec);
+  check("★ 无匹配时 matched=0、清单为空、且不谎报截断",
+    noMatch.matched === 0 && (noMatch.elements ?? []).length === 0 && noMatch.truncated !== true,
+    `matched=${noMatch.matched} 条数=${(noMatch.elements ?? []).length} truncated=${noMatch.truncated}`);
+  check("★ 无匹配时 render 明确说「一个都没匹配到」",
+    /一个都没匹配到/.test(shot.output.render({}, noMatch)[0]?.text ?? ""),
+    (shot.output.render({}, noMatch)[0]?.text ?? "").slice(-160));
+} else {
+  console.log("SKIP  find 断言 —— 受限环境下 UIA 拿不到元素（见上方 SKIP 说明）。");
+}
+
 // ── 3. cu_act 参数校验 ────────────────────────────────────────────────────
 console.log("\n--- cu_act ---");
 const act = registered.get("cu_act");
-let threw = "";
+threw = "";
 try { await act.execute({ action: "bogus" }, exec); } catch (e) { threw = String(e.message); }
 check("拒绝未知动作", threw.includes("未知动作"), threw);
 threw = "";
@@ -176,6 +281,72 @@ threw = "";
 try { await act.execute({ actions: [{ action: "bogus" }] }, exec); } catch (e) { threw = String(e.message); }
 check("批量里不合法要带下标且整批未执行", threw.includes("actions[0]") && threw.includes("整批未执行"), threw);
 
+// --- cu_act find_text（新增：按名字点；找不到就返回"没找到"，不抛错）------
+// ★ 为什么要有它：模型经常"知道它叫微信，但不知道坐标"。以前只能
+//   先 cu_probe(kind="find") 再自己决定要不要点 —— 那个"决定"是模型做的，
+//   插件管不着；实测过模型会拿**上一次的 SoM 编号**去点（旧位置），点错地方。
+//   现在 find_text 把"找 → 点"合成一步。
+// ★ 语义（2026-10-16 按用户要求定）：**零匹配不抛错** —— 返回一条 ok:false 的
+//   "没找到"结果，把情况讲清楚（没点任何东西 + 三条下一步建议），由模型自己决定。
+//   **参数不合法**才抛错（那是写错了，不是"没找到"）。
+// ⚠️ 受限环境（沙箱 / 低权限）下 UIA 常常拿不到元素 ⇒ 命中路径无法真跑，只断言"没找到"这一侧。
+threw = "";
+try { await act.execute({ action: "click", find_text: "   " }, exec); } catch (e) { threw = String(e.message); }
+check("★ find_text 空串被拒（不静默当没给）", /不能是空字符串/.test(threw), threw);
+threw = "";
+try { await act.execute({ action: "type", text: "a", find_text: "微信" }, exec); } catch (e) { threw = String(e.message); }
+check("★ find_text 用在不需要坐标的动作上被拒", /只对需要坐标的动作/.test(threw), threw);
+threw = "";
+try { await act.execute({ action: "click", find_text: "微信", element: 1 }, exec); } catch (e) { threw = String(e.message); }
+check("★ find_text 与 element 同时给被拒", /不能同时给/.test(threw), threw);
+threw = "";
+try { await act.execute({ action: "click", find_text: "微信", find_scope: "nope" }, exec); } catch (e) { threw = String(e.message); }
+check("★ find_scope 非法被拒", /find_scope 必须是/.test(threw), threw);
+
+// ★ 最关键的一条：找不到 → **不抛错**，而是回一条讲清楚的"没找到"
+threw = "";
+let nf = null;
+try { nf = await act.execute({ action: "double_click", find_text: "zzz绝对不存在zzz" }, exec); } catch (e) { threw = String(e.message); }
+check("★ find_text 零匹配 → 不抛错（是结果，不是异常）", threw === "", threw.slice(0, 140));
+check("★ 零匹配 → ok:false + notFound:true", nf?.ok === false && nf?.notFound === true, JSON.stringify(nf).slice(0, 140));
+check("★ 零匹配说明里明说「没有点任何东西」", /没有点任何东西/.test(nf?.error ?? ""), (nf?.error ?? "").slice(0, 150));
+check("★ 零匹配给出下一步建议（换关键词/换范围/截图看）",
+  /换个关键词/.test(nf?.error ?? "") && /find_scope/.test(nf?.error ?? "") && /cu_screenshot/.test(nf?.error ?? ""),
+  (nf?.error ?? "").slice(-120));
+check("★ 零匹配时 render 不摆成报错", /没执行/.test(act.output.render({}, nf)[0]?.text ?? ""), act.output.render({}, nf)[0]?.text?.slice(0, 90));
+
+// ★ 批量：某条没找到 → 该条标 notFound、其后标"未执行"（默认遇错即停），**整批不抛异常**
+threw = "";
+let bnf = null;
+try {
+  bnf = await act.execute({ actions: [
+    { action: "click", find_text: "zzz绝对不存在zzz" },
+    { action: "click", x: 5, y: 5 },
+  ] }, exec);
+} catch (e) { threw = String(e.message); }
+check("★ 批量里 find_text 零匹配 → 不抛错", threw === "", threw.slice(0, 140));
+check("★ 批量：该条 notFound、其后 skipped、下标完整",
+  bnf?.steps?.[0]?.notFound === true && bnf?.steps?.[1]?.skipped === true && bnf.steps.length === 2,
+  JSON.stringify(bnf?.steps).slice(0, 200));
+
+// 给了 x/y 时 find_text 不该参与解析（x/y 优先，与 element 同款语义）。
+// ⚠️ 故意用"缺 y"的调用：这样能证明**解析没发生**（报的是缺参数，不是"没找到"），
+//    同时又绝不会真执行任何动作 —— 冒烟测试不该动用户的鼠标。
+threw = "";
+try { await act.execute({ action: "click", x: 4, find_text: "zzz绝对不存在zzz" }, exec); } catch (e) { threw = String(e.message); }
+check("给了 x 时 find_text 不参与解析（报缺参数而非没找到）",
+  /缺参数 y/.test(threw) && !/没找到/.test(threw), threw);
+
+// ★ 旧编号残留（2026-10-16 修，实测抓到的静默点错）：
+//   空清单/降级时若不**清掉**上一张截图的编号表，cu_act(element=N) 会命中
+//   上一张截图的旧坐标 —— 模型以为点的是刚看到的东西，实际点的是旧位置。
+//   实测复现过：som+find 零匹配后 element=1 仍解析成上一次截图的旧坐标并点了出去。
+//   这里断言"零匹配之后旧编号必须失效"。受限环境 UIA 常为 0 个元素，正好走这条路径。
+threw = "";
+try { await act.execute({ action: "click", element: 1 }, exec); } catch (e) { threw = String(e.message); }
+check("★ 零匹配/空清单后旧 SoM 编号失效（不再点到上一张截图的坐标）",
+  /找不到 SoM 编号/.test(threw), threw);
+
 // ── 4. cu_probe ───────────────────────────────────────────────────────────
 console.log("\n--- cu_probe ---");
 const probe = registered.get("cu_probe");
@@ -187,6 +358,86 @@ check("dir 查询通过", dirV.ok === true && Array.isArray(dirV.entries), `${di
 threw = "";
 try { await probe.execute({ kind: "nonsense" }, exec); } catch (e) { threw = String(e.message); }
 check("拒绝未知 kind", threw.includes("未知 kind"), threw);
+
+// --- cu_probe clickable（新增：悬停式可点击性探针）------------------------
+// ★ 为什么要有它：实测连查 7 个窗口（含 Chromium 类、文件资源管理器），UIA 可交互
+//   元素**全部为 0**，而插件跑时同类窗口能拿到 60 个 —— 「靠 UIA 知道哪儿能点」
+//   时灵时不灵。悬停探针不依赖 UIA，直接问系统"鼠标悬在能点的东西上吗"。
+// ★ 断言分两档：**光标读取**是硬断言（纯读，任何环境都该成）；
+//   **鼠标移动**是环境条件（受限令牌/沙箱下 SetCursorPos 被静默拒绝），
+//   所以只断言"即使动不了也必须诚实报告 moved:false + 拒绝给结论"，不断言一定能动。
+const ro = await probe.execute({ kind: "clickable" }, exec);
+check("clickable 只读模式通过", ro.ok === true && ro.mode === "read-only", JSON.stringify(ro).slice(0, 140));
+check("★ 只读模式真的没动鼠标", ro.moved === false, `moved=${ro.moved}`);
+check("读出了光标形态", typeof ro.cursor?.type === "string" && ro.cursor.type.length > 0,
+  `type=${ro.cursor?.type} @ (${ro.cursor?.x},${ro.cursor?.y})`);
+check("只读模式给出 verdict", typeof ro.verdict === "string", `verdict=${ro.verdict}`);
+
+const hov = await probe.execute({ kind: "clickable", x: 10, y: 10 }, exec);
+check("clickable 悬停模式通过", hov.ok === true && hov.mode === "hover", JSON.stringify(hov).slice(0, 140));
+check("报告了目标结果数组", Array.isArray(hov.targets) && hov.targets.length === 1, `${hov.targets?.length} 个`);
+check("结果带光标/噪声/净信号字段", (() => {
+  const t = hov.targets?.[0];
+  return t && typeof t.cursor === "string" && typeof t.noisePct === "number"
+    && typeof t.hoverChangedPct === "number" && typeof t.signalPct === "number";
+})(), JSON.stringify(hov.targets?.[0]));
+check("★ 报告鼠标是否还原（诚实报告，不假设成功）", typeof hov.restored === "boolean", `restored=${hov.restored}`);
+
+// ★ 最关键的一条：鼠标动不了时**必须拒绝给结论**，不能拿"鼠标原来那个位置"的光标形态
+//   冒充目标位置的结论（这个坑实测踩过：verdict 曾报成 text-input）。
+if (hov.moved === false) {
+  check("★ 鼠标没动成时一律 unknown（不编结论）",
+    hov.targets.every((t) => t.verdict === "unknown" && t.confidence === "无"),
+    hov.targets.map((t) => `${t.verdict}/${t.confidence}`).join(","));
+  check("★ 鼠标没动成时带明确告诫", /没能移动|不可信/.test(hov.note ?? ""), (hov.note ?? "").slice(0, 90));
+  console.log("SKIP  鼠标移动本身（当前环境 SetCursorPos 被拒）—— 悬停那半边留待真机验证。");
+} else {
+  check("鼠标移动成功时给出结论", hov.targets.every((t) => typeof t.verdict === "string"));
+}
+
+const multi = await probe.execute({ kind: "clickable", targets: [{ x: 5, y: 5 }, { x: 20, y: 20 }] }, exec);
+check("targets 批量（多目标）通过", multi.ok === true && multi.targets?.length === 2, `${multi.targets?.length} 个`);
+
+const roForce = await probe.execute({ kind: "clickable", x: 10, y: 10, move: false }, exec);
+check("move:false 强制只读（给了坐标也不动鼠标）",
+  roForce.mode === "read-only" && roForce.moved === false, `mode=${roForce.mode}`);
+
+threw = "";
+try { await probe.execute({ kind: "clickable", x: 99999, y: 10 }, exec); } catch (e) { threw = String(e.message); }
+check("★ clickable 越界坐标被拒", /越界/.test(threw), threw);
+
+threw = "";
+try { await probe.execute({ kind: "clickable", targets: "nope" }, exec); } catch (e) { threw = String(e.message); }
+check("clickable targets 非数组被拒", /targets/.test(threw), threw);
+
+// --- cu_probe find（新增：按名字找元素，**不发图**）------------------------
+// ★ 为什么要有它：cu_screenshot(som=true) 每次都要发一张图（≈642 token），
+//   而"这东西在哪"往往只需要坐标。find 复用同一个 UIA 后端但**不截屏、不回图**。
+//   两条底线：① 结果里**不能**出现图片/路径字段（否则"不发图"就是空话）；
+//             ② 名字必填（不给名字等于"倒整份清单"，那该走 screenshot 那条路）。
+threw = "";
+try { await probe.execute({ kind: "find" }, exec); } catch (e) { threw = String(e.message); }
+check("★ find 缺 text 被拒（不给名字不许倒清单）", /text/.test(threw), threw);
+threw = "";
+try { await probe.execute({ kind: "find", text: "x", scope: "nope" }, exec); } catch (e) { threw = String(e.message); }
+check("★ find 非法 scope 被拒", /scope/.test(threw), threw);
+
+const findR = await probe.execute({ kind: "find", text: "搜索", scope: "taskbar" }, exec);
+check("find 能跑通（或明确报错，不抛异常）",
+  findR.ok === true || typeof findR.error === "string", JSON.stringify(findR).slice(0, 160));
+check("★ find 结果里没有图片/截图路径字段（确实不发图）",
+  findR.image === undefined && findR.path === undefined && findR.mediaType === undefined,
+  Object.keys(findR).join(","));
+if (findR.ok === true) {
+  check("find 回传 matched 与 elements", typeof findR.matched === "number" && Array.isArray(findR.elements),
+    `matched=${findR.matched}`);
+  if (findR.matched === 0) {
+    console.log("SKIP  find 命中项 —— 受限环境下 UIA 拿不到元素（见上方 SKIP 说明）。");
+  } else {
+    check("★ find 只回匹配项", findR.elements.every((e) => String(e.name).includes("搜索")),
+      JSON.stringify(findR.elements.map((e) => e.name)).slice(0, 140));
+  }
+}
 
 // ── 5. cu_wait ────────────────────────────────────────────────────────────
 console.log("\n--- cu_wait ---");

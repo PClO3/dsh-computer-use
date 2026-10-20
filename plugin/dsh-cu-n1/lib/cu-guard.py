@@ -113,6 +113,16 @@ DEFAULT_POLICY = {
         "elevatedUnknown": "deny",
         # 命中时是否抛异常（False = 只记审计放行；调试用）
         "enforce": True,
+        # ★ 全局热键黑名单**必须有默认值**：策略文件解析失败时（下面的 except 会静默跳过）
+        #   若这里没有项，hotkey_rules 就是 []，`if not up and hotkey_rules:` 恒假
+        #   ⇒ Win+R/L/X/I、Ctrl+Shift+Esc/Enter、Ctrl+Alt+Del 全部静默放行。
+        #   实测过的路径：policy.json 一个笔误 = 安全层静默降级，且界面无任何提示。
+        "denyHotkeys": [
+            "win+r", "win+l", "win+x", "win+i",
+            "ctrl+shift+esc", "ctrl+shift+enter", "ctrl+alt+del",
+        ],
+        # 取不到目标窗口时的姿态：deny（fail-closed）/ allow
+        "unknownWindow": "deny",
     },
     # 审计日志
     "auditPath": None,
@@ -957,7 +967,7 @@ def _install_gui_guard():
         ★ 为什么光清账本没用（已用桩 PoC 实证、并读码确认的漏洞）：
           pyautogui 的 hotkey() 在 keyDown 抛异常后**不会执行 keyUp 循环**
           （它没有 try/finally）⇒ 此前已转发出去的 ctrl↓/shift↓/win↓ 会在 **OS 层残留**。
-          残留的后果不只是"我这边账本对不上"：OS 里 Win 一直按着，
+          残留的后果不只是"护栏的账本对不上"：OS 里 Win 一直按着，
           之后**任何一次裸按键都会变成 Win 组合** ——
             残留 Win + 裸 r ⇒ 运行框弹出；残留 Win + 裸 l ⇒ 锁屏；
             残留 Ctrl+Shift + 裸 esc ⇒ 任务管理器被打开。
